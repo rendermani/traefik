@@ -56,90 +56,41 @@ jobs:
           fi
           echo "🎯 Target environment: $(grep environment $GITHUB_OUTPUT | cut -d= -f2)"
       
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.8.0
-        with:
-          ssh-private-key: ${{ secrets.TRAEFIK_DEPLOY_KEY }}
-      
-      - name: Deploy Traefik via Nomad
+      - name: Deploy Traefik via Nomad API
         if: github.event.inputs.action == 'deploy-nomad' || github.event.inputs.action == ''
         env:
-          SERVER_IP: ${{ secrets.SERVER_IP }}
-          DOMAIN: ${{ steps.env.outputs.environment == 'production' && 'cloudya.net' || 'staging.cloudya.net' }}
+          NOMAD_ADDR: ${{ secrets.NOMAD_ADDR }}
+          NOMAD_TOKEN: ${{ secrets.NOMAD_TOKEN }}
         run: |
-          echo "🚀 Deploying Traefik via Nomad with persistent SSL"
-          echo "🌐 Domain: ${DOMAIN}"
+          echo "🚀 Deploying Traefik via Nomad API (no SSH)"
           
-          # Upload Nomad job file
-          scp -o StrictHostKeyChecking=no \
-            traefik.nomad \
-            root@${SERVER_IP}:/tmp/traefik.nomad
+          # Install nomad CLI to convert HCL to JSON
+          curl -sL https://releases.hashicorp.com/nomad/1.7.2/nomad_1.7.2_linux_amd64.zip -o nomad.zip
+          unzip -q nomad.zip
+          chmod +x nomad
           
-          # Deploy via SSH
-          ssh -o StrictHostKeyChecking=no root@${SERVER_IP} << 'DEPLOY_SCRIPT'
-            set -e
-            
-            # Configure Nomad host volumes if not already done
-            if ! grep -q "traefik-certs" /etc/nomad.d/nomad.hcl; then
-              echo "Configuring Nomad host volumes..."
-              cat >> /etc/nomad.d/nomad.hcl << 'NOMADCONFIG'
-
-# Host volumes for Traefik persistence
-client {
-  host_volume "traefik-certs" {
-    path      = "/opt/nomad/volumes/traefik-certs"
-    read_only = false
-  }
-  
-  host_volume "traefik-config" {
-    path      = "/opt/nomad/volumes/traefik-config"
-    read_only = false
-  }
-}
-NOMADCONFIG
-              systemctl restart nomad
-              sleep 10
-            fi
-            
-            # Create persistent directories
-            mkdir -p /opt/nomad/volumes/traefik-certs
-            mkdir -p /opt/nomad/volumes/traefik-config/dynamic
-            chmod 700 /opt/nomad/volumes/traefik-certs
-            chmod 755 /opt/nomad/volumes/traefik-config
-            
-            # Initialize ACME storage
-            if [ ! -f /opt/nomad/volumes/traefik-certs/acme.json ]; then
-              echo '{}' > /opt/nomad/volumes/traefik-certs/acme.json
-              chmod 600 /opt/nomad/volumes/traefik-certs/acme.json
-              echo "Created new ACME storage"
-            else
-              echo "ACME storage exists"
-            fi
-            
-            # Stop existing Traefik
-            nomad job stop -purge traefik 2>/dev/null || true
-            sleep 5
-            
-            # Deploy new Traefik job
-            echo "Deploying Traefik job..."
-            nomad job run /tmp/traefik.nomad
-            
-            # Wait for deployment
-            sleep 20
-            
-            # Check status
-            nomad job status traefik
-            
-            # Trigger certificate generation
-            echo "Triggering Let's Encrypt certificates..."
-            for DOMAIN in traefik vault nomad metrics grafana api app; do
-              curl -s -H "Host: ${DOMAIN}.cloudya.net" http://localhost/ >/dev/null 2>&1 || true
-              sleep 2
-            done
-            
-            # Clean up
-            rm -f /tmp/traefik.nomad
-          DEPLOY_SCRIPT
+          # Convert HCL to JSON
+          ./nomad job run -output traefik.nomad > traefik.json
+          
+          # Submit job via Nomad API
+          echo "Submitting job to Nomad..."
+          RESPONSE=$(curl -X POST \
+            -H "X-Nomad-Token: ${NOMAD_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @traefik.json \
+            "${NOMAD_ADDR}/v1/jobs" \
+            -w "\n%{http_code}" -s)
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Job submitted successfully via API"
+            EVAL_ID=$(echo "$RESPONSE" | head -n-1 | jq -r .EvalID)
+            echo "Evaluation ID: $EVAL_ID"
+          else
+            echo "❌ Failed to submit job. HTTP Code: $HTTP_CODE"
+            exit 1
+          fi
       
       - name: Deploy Traefik (Legacy)
         if: github.event.inputs.action != 'deploy-nomad' && github.event.inputs.action != ''
