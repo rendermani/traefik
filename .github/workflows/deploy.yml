@@ -82,7 +82,7 @@ jobs:
             # Configure Nomad host volumes if not already done
             if ! grep -q "traefik-certs" /etc/nomad.d/nomad.hcl; then
               echo "Configuring Nomad host volumes..."
-              cat >> /etc/nomad.d/nomad.hcl << 'CONFIG'
+              cat >> /etc/nomad.d/nomad.hcl << 'NOMADCONFIG'
 
 # Host volumes for Traefik persistence
 client {
@@ -96,7 +96,7 @@ client {
     read_only = false
   }
 }
-CONFIG
+NOMADCONFIG
               systemctl restart nomad
               sleep 10
             fi
