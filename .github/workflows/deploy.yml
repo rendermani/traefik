@@ -56,23 +56,68 @@ jobs:
           fi
           echo "🎯 Target environment: $(grep environment $GITHUB_OUTPUT | cut -d= -f2)"
       
-      - name: Deploy Traefik via Nomad API
+      - name: Deploy Traefik via Nomad API with Vault
         if: github.event.inputs.action == 'deploy-nomad' || github.event.inputs.action == ''
         env:
-          NOMAD_ADDR: ${{ secrets.NOMAD_ADDR }}
-          NOMAD_TOKEN: ${{ secrets.NOMAD_TOKEN }}
+          VAULT_ADDR: ${{ secrets.VAULT_ADDR || 'https://vault.cloudya.net' }}
+          VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
         run: |
-          echo "🚀 Deploying Traefik via Nomad API (no SSH)"
+          echo "🚀 Deploying Traefik via Vault-integrated Nomad API"
           
-          # Install nomad CLI to convert HCL to JSON
-          echo "Installing Nomad CLI..."
+          # Install required tools
+          echo "Installing required tools..."
+          
+          # Install Vault CLI
+          curl -sL https://releases.hashicorp.com/vault/1.15.4/vault_1.15.4_linux_amd64.zip -o vault.zip
+          unzip -q vault.zip
+          chmod +x vault
+          
+          # Install Nomad CLI
           curl -sL https://releases.hashicorp.com/nomad/1.7.2/nomad_1.7.2_linux_amd64.zip -o nomad.zip
           unzip -q nomad.zip
           chmod +x nomad
           
-          # Debug: Check if files exist
-          echo "Current directory contents:"
-          ls -la
+          # Check Vault connectivity
+          echo "Checking Vault connectivity..."
+          export VAULT_ADDR="${VAULT_ADDR}"
+          export VAULT_TOKEN="${VAULT_TOKEN}"
+          
+          if ! ./vault status >/dev/null 2>&1; then
+            echo "⚠️ WARNING: Cannot connect to Vault"
+            echo "Falling back to GitHub secrets..."
+            
+            # Fallback to GitHub secrets if Vault is not available
+            NOMAD_ADDR="${{ secrets.NOMAD_ADDR }}"
+            NOMAD_TOKEN="${{ secrets.NOMAD_TOKEN }}"
+          else
+            echo "✅ Vault is accessible"
+            
+            # Retrieve Nomad credentials from Vault
+            echo "Retrieving Nomad credentials from Vault..."
+            NOMAD_TOKEN=$(./vault kv get -field=token kv/data/traefik/nomad 2>/dev/null || echo "")
+            NOMAD_ADDR=$(./vault kv get -field=addr kv/data/traefik/nomad 2>/dev/null || echo "https://nomad.cloudya.net")
+            
+            if [ -z "$NOMAD_TOKEN" ]; then
+              echo "⚠️ No Nomad token found in Vault"
+              echo "Attempting to use GitHub secret..."
+              NOMAD_TOKEN="${{ secrets.NOMAD_TOKEN }}"
+            else
+              echo "✅ Retrieved Nomad credentials from Vault"
+            fi
+          fi
+          
+          # Check if we have valid credentials
+          if [ -z "$NOMAD_TOKEN" ] || [[ "$NOMAD_TOKEN" == *"PLACEHOLDER"* ]]; then
+            echo "❌ No valid Nomad token available"
+            echo ""
+            echo "Please either:"
+            echo "1. Store token in Vault at kv/data/traefik/nomad"
+            echo "2. Set NOMAD_TOKEN secret in GitHub"
+            echo ""
+            echo "To create a Nomad token:"
+            echo "  nomad acl token create -type=\"management\" -name=\"github-actions\" -global"
+            exit 0  # Exit gracefully
+          fi
           
           # Check if traefik.nomad exists
           if [ ! -f "traefik.nomad" ]; then
@@ -84,44 +129,20 @@ jobs:
           echo "Converting HCL to JSON..."
           ./nomad job run -output traefik.nomad > traefik.json || {
             echo "❌ Failed to convert HCL to JSON"
-            echo "Nomad error output:"
-            ./nomad job run -output traefik.nomad
             exit 1
           }
           
-          # Check JSON was created
-          if [ ! -f "traefik.json" ] || [ ! -s "traefik.json" ]; then
-            echo "❌ traefik.json was not created or is empty"
-            exit 1
-          fi
-          
-          echo "JSON file created successfully"
-          echo "JSON file size: $(wc -c < traefik.json) bytes"
+          echo "JSON file created ($(wc -c < traefik.json) bytes)"
           
           # Submit job via Nomad API
-          echo "Submitting job to Nomad..."
-          echo "Nomad Address: ${NOMAD_ADDR}"
-          
-          # Check if token is placeholder
-          if [[ "${NOMAD_TOKEN}" == *"PLACEHOLDER"* ]] || [[ "${NOMAD_TOKEN}" == *"NEEDS_CONFIGURATION"* ]]; then
-            echo "⚠️ WARNING: NOMAD_TOKEN appears to be a placeholder"
-            echo "❌ Cannot deploy without valid NOMAD_TOKEN"
-            echo ""
-            echo "To get a valid Nomad token:"
-            echo "1. SSH to your server"
-            echo "2. Run: nomad acl token create -type=\"management\" -name=\"github-actions\" -global"
-            echo "3. Update the NOMAD_TOKEN secret in GitHub repository settings"
-            echo ""
-            echo "Skipping deployment due to missing credentials"
-            exit 0  # Exit gracefully since this is expected
-          fi
+          echo "Submitting job to Nomad at ${NOMAD_ADDR}..."
           
           RESPONSE=$(curl -X POST \
             -H "X-Nomad-Token: ${NOMAD_TOKEN}" \
             -H "Content-Type: application/json" \
             -d @traefik.json \
             "${NOMAD_ADDR}/v1/jobs" \
-            -w "\n%{http_code}" -s --fail-with-body)
+            -w "\n%{http_code}" -s)
           
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
           BODY=$(echo "$RESPONSE" | head -n-1)
@@ -129,23 +150,22 @@ jobs:
           echo "HTTP Response Code: $HTTP_CODE"
           
           if [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ Job submitted successfully via API"
+            echo "✅ Job submitted successfully"
             EVAL_ID=$(echo "$BODY" | jq -r .EvalID 2>/dev/null || echo "N/A")
             echo "Evaluation ID: $EVAL_ID"
+            
+            # Monitor deployment
+            echo "Waiting for deployment to stabilize..."
+            sleep 15
+            
+            # Check job status
+            JOB_STATUS=$(curl -s -H "X-Nomad-Token: ${NOMAD_TOKEN}" \
+              "${NOMAD_ADDR}/v1/job/traefik" | jq -r '.Status' 2>/dev/null || echo "unknown")
+            
+            echo "Job Status: $JOB_STATUS"
           else
             echo "❌ Failed to submit job. HTTP Code: $HTTP_CODE"
-            echo "Response body:"
-            echo "$BODY"
-            
-            # Provide helpful error messages
-            if [ "$HTTP_CODE" = "403" ]; then
-              echo "Authentication failed - check NOMAD_TOKEN"
-            elif [ "$HTTP_CODE" = "404" ]; then
-              echo "Nomad API endpoint not found - check NOMAD_ADDR"
-            elif [ "$HTTP_CODE" = "500" ]; then
-              echo "Nomad server error - check server logs"
-            fi
-            
+            echo "Response: $BODY"
             exit 1
           fi
       

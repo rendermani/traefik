@@ -56,6 +56,12 @@ job "traefik" {
     task "traefik" {
       driver = "docker"
       
+      # Vault integration for secrets
+      vault {
+        policies = ["traefik-policy"]
+        change_mode = "restart"
+      }
+      
       volume_mount {
         volume      = "traefik-certs"
         destination = "/letsencrypt"
@@ -75,6 +81,23 @@ job "traefik" {
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock:ro"
         ]
+      }
+
+      # Template for Vault secrets - environment variables
+      template {
+        data = <<EOH
+{{- with secret "kv/data/traefik/dashboard" }}
+DASHBOARD_USER={{ .Data.data.username }}
+DASHBOARD_PASS={{ .Data.data.password }}
+DASHBOARD_AUTH={{ .Data.data.auth }}
+{{- end }}
+{{- with secret "kv/data/traefik/nomad" }}
+NOMAD_TOKEN={{ .Data.data.token }}
+NOMAD_ADDR={{ .Data.data.addr }}
+{{- end }}
+EOH
+        destination = "secrets/env"
+        env         = true
       }
 
       env {
@@ -217,7 +240,9 @@ http:
     auth-dashboard:
       basicAuth:
         users:
-          - "admin:$2y$10$9L.K4cPdl8rwLgiYBNO9H.7L9X9RNzycQP7gFPNsuAcLqsXoLyoO2"
+{{ with secret "kv/data/traefik/dashboard" }}
+          - "{{ .Data.data.auth }}"
+{{ end }}
     
     security-headers:
       headers:
