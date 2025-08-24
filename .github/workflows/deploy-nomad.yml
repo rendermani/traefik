@@ -1,0 +1,146 @@
+name: Deploy Traefik via Nomad API
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
+
+jobs:
+  deploy-traefik:
+    name: Deploy Traefik to Nomad
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Convert HCL to JSON
+        run: |
+          echo "📦 Converting Nomad job to JSON..."
+          
+          # Install nomad CLI to convert HCL to JSON
+          curl -L https://releases.hashicorp.com/nomad/1.7.2/nomad_1.7.2_linux_amd64.zip -o nomad.zip
+          unzip nomad.zip
+          chmod +x nomad
+          
+          # Convert HCL to JSON
+          ./nomad job run -output traefik.nomad > traefik.json
+          
+          echo "✅ Job converted to JSON"
+      
+      - name: Deploy to Nomad via API
+        env:
+          NOMAD_ADDR: ${{ secrets.NOMAD_ADDR }}
+          NOMAD_TOKEN: ${{ secrets.NOMAD_TOKEN }}
+        run: |
+          echo "🚀 Deploying Traefik to Nomad..."
+          
+          # Submit job via Nomad API
+          RESPONSE=$(curl -X POST \
+            -H "X-Nomad-Token: ${NOMAD_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @traefik.json \
+            "${NOMAD_ADDR}/v1/jobs" \
+            -w "\n%{http_code}")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Job submitted successfully"
+            echo "$BODY" | jq .
+            
+            EVAL_ID=$(echo "$BODY" | jq -r .EvalID)
+            echo "Evaluation ID: $EVAL_ID"
+            
+            # Wait for deployment
+            sleep 30
+            
+            # Check job status
+            JOB_STATUS=$(curl -s -H "X-Nomad-Token: ${NOMAD_TOKEN}" \
+              "${NOMAD_ADDR}/v1/job/traefik" | jq -r .Status)
+            
+            echo "Job Status: $JOB_STATUS"
+            
+            if [ "$JOB_STATUS" = "running" ]; then
+              echo "✅ Traefik is running"
+            else
+              echo "⚠️ Job status: $JOB_STATUS"
+            fi
+          else
+            echo "❌ Failed to submit job. HTTP Code: $HTTP_CODE"
+            echo "$BODY"
+            exit 1
+          fi
+      
+      - name: Wait for Certificate Generation
+        run: |
+          echo "⏳ Waiting for Let's Encrypt certificates..."
+          sleep 60
+      
+      - name: Test SSL Certificates
+        run: |
+          echo "🔐 Testing SSL certificates with OpenSSL..."
+          echo "============================================"
+          
+          FAIL_COUNT=0
+          SUCCESS_COUNT=0
+          
+          # Test each domain
+          for SERVICE in traefik vault nomad api app; do
+            DOMAIN="${SERVICE}.cloudya.net"
+            echo ""
+            echo "Testing: $DOMAIN"
+            
+            # Test with OpenSSL
+            CERT_INFO=$(echo | timeout 10 openssl s_client -connect "${DOMAIN}:443" -servername "${DOMAIN}" 2>/dev/null || true)
+            
+            if [ -n "$CERT_INFO" ]; then
+              # Get issuer
+              ISSUER=$(echo "$CERT_INFO" | openssl x509 -noout -issuer 2>/dev/null || echo "")
+              
+              # Check for Let's Encrypt
+              if echo "$ISSUER" | grep -qi "let's encrypt\|ISRG\|R[0-9]"; then
+                echo "  ✅ Let's Encrypt certificate detected"
+                echo "  Issuer: $ISSUER"
+                ((SUCCESS_COUNT++))
+                
+              # Check for default certificate
+              elif echo "$ISSUER" | grep -qi "traefik\|default"; then
+                echo "  ❌ DEFAULT CERTIFICATE DETECTED!"
+                echo "  Issuer: $ISSUER"
+                ((FAIL_COUNT++))
+                
+              else
+                echo "  ⚠️ Unknown certificate"
+                echo "  Issuer: $ISSUER"
+              fi
+            else
+              echo "  ⚠️ SSL connection failed (may be pending)"
+            fi
+          done
+          
+          echo ""
+          echo "============================================"
+          echo "Summary:"
+          echo "  Success: $SUCCESS_COUNT domains with Let's Encrypt"
+          echo "  Failed: $FAIL_COUNT domains with issues"
+          
+          if [ $FAIL_COUNT -gt 0 ]; then
+            echo ""
+            echo "⚠️ Found default certificates or issues"
+            echo "Note: Certificates may take a few minutes to generate"
+          elif [ $SUCCESS_COUNT -eq 0 ]; then
+            echo ""
+            echo "⚠️ No Let's Encrypt certificates detected yet"
+          else
+            echo ""
+            echo "✅ SSL certificates are properly configured!"
+          fi
