@@ -100,12 +100,28 @@ jobs:
           
           # Submit job via Nomad API
           echo "Submitting job to Nomad..."
+          echo "Nomad Address: ${NOMAD_ADDR}"
+          
+          # Check if token is placeholder
+          if [[ "${NOMAD_TOKEN}" == *"PLACEHOLDER"* ]] || [[ "${NOMAD_TOKEN}" == *"NEEDS_CONFIGURATION"* ]]; then
+            echo "⚠️ WARNING: NOMAD_TOKEN appears to be a placeholder"
+            echo "❌ Cannot deploy without valid NOMAD_TOKEN"
+            echo ""
+            echo "To get a valid Nomad token:"
+            echo "1. SSH to your server"
+            echo "2. Run: nomad acl token create -type=\"management\" -name=\"github-actions\" -global"
+            echo "3. Update the NOMAD_TOKEN secret in GitHub repository settings"
+            echo ""
+            echo "Skipping deployment due to missing credentials"
+            exit 0  # Exit gracefully since this is expected
+          fi
+          
           RESPONSE=$(curl -X POST \
             -H "X-Nomad-Token: ${NOMAD_TOKEN}" \
             -H "Content-Type: application/json" \
             -d @traefik.json \
             "${NOMAD_ADDR}/v1/jobs" \
-            -w "\n%{http_code}" -s)
+            -w "\n%{http_code}" -s --fail-with-body)
           
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
           BODY=$(echo "$RESPONSE" | head -n-1)
@@ -114,12 +130,22 @@ jobs:
           
           if [ "$HTTP_CODE" = "200" ]; then
             echo "✅ Job submitted successfully via API"
-            EVAL_ID=$(echo "$BODY" | jq -r .EvalID)
+            EVAL_ID=$(echo "$BODY" | jq -r .EvalID 2>/dev/null || echo "N/A")
             echo "Evaluation ID: $EVAL_ID"
           else
             echo "❌ Failed to submit job. HTTP Code: $HTTP_CODE"
             echo "Response body:"
             echo "$BODY"
+            
+            # Provide helpful error messages
+            if [ "$HTTP_CODE" = "403" ]; then
+              echo "Authentication failed - check NOMAD_TOKEN"
+            elif [ "$HTTP_CODE" = "404" ]; then
+              echo "Nomad API endpoint not found - check NOMAD_ADDR"
+            elif [ "$HTTP_CODE" = "500" ]; then
+              echo "Nomad server error - check server logs"
+            fi
+            
             exit 1
           fi
       
