@@ -1,0 +1,122 @@
+# Traefik Static Configuration
+# This file contains the static configuration that requires restart to apply
+
+# API and Dashboard
+api:
+  dashboard: true
+  debug: false
+
+# Entry Points
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  
+  websecure:
+    address: ":443"
+    http:
+      tls:
+        certResolver: letsencrypt
+        domains:
+          - main: "cloudya.net"
+            sans:
+              - "*.cloudya.net"
+  
+  metrics:
+    address: ":8082"
+
+# Providers
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+  
+  # Nomad provider (enabled when Nomad is detected)
+  nomad:
+    endpoint:
+      address: http://localhost:4646
+    prefix: traefik
+    exposedByDefault: false
+    namespaces:
+      - default
+    refreshInterval: 30s
+
+# Certificate Resolvers
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: admin@cloudya.net
+      storage: /etc/traefik/acme.json
+      keyType: EC256
+      httpChallenge:
+        entryPoint: web
+      # DNS challenge for wildcard certificates
+      dnsChallenge:
+        provider: cloudflare
+        delayBeforeCheck: 30s
+        resolvers:
+          - "1.1.1.1:53"
+          - "8.8.8.8:53"
+
+# Logs
+log:
+  level: INFO
+  format: json
+  filePath: /var/log/traefik/traefik.log
+
+accessLog:
+  filePath: /var/log/traefik/access.log
+  format: json
+  filters:
+    statusCodes:
+      - "200-299"
+      - "400-499"
+      - "500-599"
+  fields:
+    defaultMode: keep
+    headers:
+      defaultMode: drop
+      names:
+        User-Agent: keep
+        Authorization: drop
+        Cookie: drop
+
+# Metrics
+metrics:
+  prometheus:
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true
+    entryPoint: metrics
+    buckets:
+      - 0.1
+      - 0.3
+      - 1.2
+      - 5.0
+
+# Ping (Health Check)
+ping:
+  entryPoint: web
+
+# Global settings
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+# Server Transport
+serversTransport:
+  insecureSkipVerify: false
+  maxIdleConnsPerHost: 200
+  forwardingTimeouts:
+    dialTimeout: 30s
+    responseHeaderTimeout: 30s
+    idleConnTimeout: 90s
+
+# Pilot (Traefik Cloud) - disabled
+pilot:
+  dashboard: false

@@ -1,0 +1,150 @@
+# Dynamic Router Definitions
+# Maps domains to services with middleware
+
+http:
+  routers:
+    # Traefik Dashboard
+    traefik-dashboard:
+      rule: "Host(`traefik.cloudya.net`)"
+      service: api@internal
+      middlewares:
+        - auth-dashboard
+        - security-headers
+        - rate-limit
+      tls:
+        certResolver: letsencrypt
+    
+    # Vault Router
+    vault:
+      rule: "Host(`vault.cloudya.net`)"
+      service: vault
+      middlewares:
+        - security-headers
+        - rate-limit-api
+      tls:
+        certResolver: letsencrypt
+    
+    # Nomad Router
+    nomad:
+      rule: "Host(`nomad.cloudya.net`)"
+      service: nomad
+      middlewares:
+        - security-headers
+        - auth-basic
+      tls:
+        certResolver: letsencrypt
+    
+    # Prometheus Router
+    prometheus:
+      rule: "Host(`metrics.cloudya.net`)"
+      service: prometheus
+      middlewares:
+        - security-headers
+        - auth-basic
+      tls:
+        certResolver: letsencrypt
+    
+    # Grafana Router
+    grafana:
+      rule: "Host(`grafana.cloudya.net`)"
+      service: grafana
+      middlewares:
+        - security-headers
+      tls:
+        certResolver: letsencrypt
+    
+    # Loki Router
+    loki:
+      rule: "Host(`logs.cloudya.net`)"
+      service: loki
+      middlewares:
+        - security-headers
+        - auth-basic
+      tls:
+        certResolver: letsencrypt
+    
+    # MinIO Router
+    minio:
+      rule: "Host(`storage.cloudya.net`)"
+      service: minio
+      middlewares:
+        - security-headers
+      tls:
+        certResolver: letsencrypt
+    
+    # MinIO Console Router
+    minio-console:
+      rule: "Host(`storage-console.cloudya.net`)"
+      service: minio
+      middlewares:
+        - security-headers
+      tls:
+        certResolver: letsencrypt
+    
+    # Application API Router
+    api:
+      rule: "Host(`api.cloudya.net`)"
+      service: backend
+      middlewares:
+        - security-headers
+        - cors
+        - rate-limit-api
+      tls:
+        certResolver: letsencrypt
+    
+    # Application Frontend Router
+    app:
+      rule: "Host(`app.cloudya.net`) || Host(`cloudya.net`)"
+      service: frontend
+      middlewares:
+        - security-headers
+        - compression
+      tls:
+        certResolver: letsencrypt
+    
+    # WebSocket Router for realtime connections
+    websocket:
+      rule: "Host(`ws.cloudya.net`)"
+      service: backend
+      middlewares:
+        - security-headers-websocket
+      tls:
+        certResolver: letsencrypt
+
+    # Staging environment routers
+    vault-staging:
+      rule: "Host(`vault-staging.cloudya.net`)"
+      service: vault
+      middlewares:
+        - security-headers
+        - rate-limit-api
+      tls:
+        certResolver: letsencrypt
+    
+    nomad-staging:
+      rule: "Host(`nomad-staging.cloudya.net`)"
+      service: nomad
+      middlewares:
+        - security-headers
+        - auth-basic
+      tls:
+        certResolver: letsencrypt
+    
+    api-staging:
+      rule: "Host(`api-staging.cloudya.net`)"
+      service: backend
+      middlewares:
+        - security-headers
+        - cors
+        - rate-limit-api
+      tls:
+        certResolver: letsencrypt
+    
+    app-staging:
+      rule: "Host(`app-staging.cloudya.net`) || Host(`staging.cloudya.net`)"
+      service: frontend
+      middlewares:
+        - security-headers
+        - compression
+      tls:
+        certResolver: letsencrypt

@@ -1,0 +1,89 @@
+# Dynamic Service Definitions
+# Auto-detected services will be added here dynamically
+
+http:
+  services:
+    # Vault Service
+    vault:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:8200"
+        healthCheck:
+          path: /v1/sys/health
+          interval: 10s
+          timeout: 3s
+          
+    # Nomad Service
+    nomad:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:4646"
+        healthCheck:
+          path: /v1/status/leader
+          interval: 10s
+          timeout: 3s
+    
+    # Prometheus Service
+    prometheus:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:9090"
+        healthCheck:
+          path: /-/healthy
+          interval: 10s
+          timeout: 3s
+    
+    # Grafana Service
+    grafana:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:3000"
+        healthCheck:
+          path: /api/health
+          interval: 10s
+          timeout: 3s
+    
+    # Loki Service
+    loki:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:3100"
+        healthCheck:
+          path: /ready
+          interval: 10s
+          timeout: 3s
+    
+    # MinIO Service
+    minio:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:9000"
+        healthCheck:
+          path: /minio/health/live
+          interval: 10s
+          timeout: 3s
+    
+    # Application Backend
+    backend:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:8000"
+        healthCheck:
+          path: /health
+          interval: 10s
+          timeout: 3s
+        sticky:
+          cookie:
+            name: backend_session
+            secure: true
+            httpOnly: true
+    
+    # Application Frontend
+    frontend:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:3001"
+        healthCheck:
+          path: /
+          interval: 10s
+          timeout: 3s

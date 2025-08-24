@@ -1,0 +1,331 @@
+name: Deploy Traefik
+
+on:
+  push:
+    branches:
+      - main        # Production
+      - staging     # Staging
+    paths:
+      - 'traefik.nomad'
+      - 'config/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
+  
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Deployment action'
+        required: true
+        type: choice
+        options:
+          - check
+          - install
+          - upgrade
+          - configure
+          - backup
+          - restart
+          - deploy-nomad
+        default: deploy-nomad
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+        default: staging
+
+jobs:
+  deploy-traefik:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout Traefik repository
+        uses: actions/checkout@v4
+      
+      - name: Determine environment
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          else
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          fi
+          echo "🎯 Target environment: $(grep environment $GITHUB_OUTPUT | cut -d= -f2)"
+      
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.TRAEFIK_DEPLOY_KEY }}
+      
+      - name: Deploy Traefik via Nomad
+        if: github.event.inputs.action == 'deploy-nomad' || github.event.inputs.action == ''
+        env:
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          DOMAIN: ${{ steps.env.outputs.environment == 'production' && 'cloudya.net' || 'staging.cloudya.net' }}
+        run: |
+          echo "🚀 Deploying Traefik via Nomad with persistent SSL"
+          echo "🌐 Domain: ${DOMAIN}"
+          
+          # Upload Nomad job file
+          scp -o StrictHostKeyChecking=no \
+            traefik.nomad \
+            root@${SERVER_IP}:/tmp/traefik.nomad
+          
+          # Deploy via SSH
+          ssh -o StrictHostKeyChecking=no root@${SERVER_IP} << 'DEPLOY_SCRIPT'
+            set -e
+            
+            # Configure Nomad host volumes if not already done
+            if ! grep -q "traefik-certs" /etc/nomad.d/nomad.hcl; then
+              echo "Configuring Nomad host volumes..."
+              cat >> /etc/nomad.d/nomad.hcl << 'CONFIG'
+
+# Host volumes for Traefik persistence
+client {
+  host_volume "traefik-certs" {
+    path      = "/opt/nomad/volumes/traefik-certs"
+    read_only = false
+  }
+  
+  host_volume "traefik-config" {
+    path      = "/opt/nomad/volumes/traefik-config"
+    read_only = false
+  }
+}
+CONFIG
+              systemctl restart nomad
+              sleep 10
+            fi
+            
+            # Create persistent directories
+            mkdir -p /opt/nomad/volumes/traefik-certs
+            mkdir -p /opt/nomad/volumes/traefik-config/dynamic
+            chmod 700 /opt/nomad/volumes/traefik-certs
+            chmod 755 /opt/nomad/volumes/traefik-config
+            
+            # Initialize ACME storage
+            if [ ! -f /opt/nomad/volumes/traefik-certs/acme.json ]; then
+              echo '{}' > /opt/nomad/volumes/traefik-certs/acme.json
+              chmod 600 /opt/nomad/volumes/traefik-certs/acme.json
+              echo "Created new ACME storage"
+            else
+              echo "ACME storage exists"
+            fi
+            
+            # Stop existing Traefik
+            nomad job stop -purge traefik 2>/dev/null || true
+            sleep 5
+            
+            # Deploy new Traefik job
+            echo "Deploying Traefik job..."
+            nomad job run /tmp/traefik.nomad
+            
+            # Wait for deployment
+            sleep 20
+            
+            # Check status
+            nomad job status traefik
+            
+            # Trigger certificate generation
+            echo "Triggering Let's Encrypt certificates..."
+            for DOMAIN in traefik vault nomad metrics grafana api app; do
+              curl -s -H "Host: ${DOMAIN}.cloudya.net" http://localhost/ >/dev/null 2>&1 || true
+              sleep 2
+            done
+            
+            # Clean up
+            rm -f /tmp/traefik.nomad
+          DEPLOY_SCRIPT
+      
+      - name: Deploy Traefik (Legacy)
+        if: github.event.inputs.action != 'deploy-nomad' && github.event.inputs.action != ''
+        env:
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          ACTION: ${{ github.event.inputs.action }}
+          DOMAIN: ${{ steps.env.outputs.environment == 'production' && 'cloudya.net' || 'staging.cloudya.net' }}
+          ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
+        run: |
+          echo "🚀 Deploying Traefik to ${{ steps.env.outputs.environment }}"
+          echo "📦 Action: ${ACTION}"
+          echo "🌐 Domain: ${DOMAIN}"
+          
+          # Copy deployment script and configurations
+          scp -o StrictHostKeyChecking=no \
+            scripts/deploy-traefik.sh \
+            root@${SERVER_IP}:/tmp/
+          
+          # Copy configuration files if they exist
+          if [ -d "config" ]; then
+            scp -r -o StrictHostKeyChecking=no \
+              config/ \
+              root@${SERVER_IP}:/tmp/traefik-config/
+          fi
+          
+          # Execute deployment
+          ssh -o StrictHostKeyChecking=no root@${SERVER_IP} << 'EOF'
+            set -e
+            
+            # Make script executable
+            chmod +x /tmp/deploy-traefik.sh
+            
+            # Run deployment
+            /tmp/deploy-traefik.sh \
+              --environment "${{ steps.env.outputs.environment }}" \
+              --action "${ACTION}" \
+              --domain "${DOMAIN}" \
+              --email "${ACME_EMAIL}"
+            
+            # Clean up
+            rm -f /tmp/deploy-traefik.sh
+            rm -rf /tmp/traefik-config/
+          EOF
+      
+      - name: Verify Traefik
+        env:
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          DOMAIN: ${{ steps.env.outputs.environment == 'production' && 'cloudya.net' || 'staging.cloudya.net' }}
+        run: |
+          echo "🔍 Verifying Traefik deployment..."
+          
+          # Check Traefik health
+          if curl -f -s http://${SERVER_IP}/ping; then
+            echo "✅ Traefik ping endpoint is healthy"
+          else
+            echo "❌ Traefik ping check failed"
+            exit 1
+          fi
+          
+          # Check dashboard (should require auth)
+          DASHBOARD_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://traefik.${DOMAIN}/)
+          if [ "$DASHBOARD_STATUS" = "401" ]; then
+            echo "✅ Dashboard requires authentication (expected)"
+          else
+            echo "⚠️ Dashboard returned status: $DASHBOARD_STATUS"
+          fi
+          
+          # Check metrics endpoint
+          if curl -f -s http://${SERVER_IP}:8082/metrics | head -n 5; then
+            echo "✅ Metrics endpoint is working"
+          else
+            echo "⚠️ Metrics endpoint not accessible"
+          fi
+          
+          # List configured routes
+          echo ""
+          echo "📋 Checking service routes..."
+          
+          # Test service endpoints (should redirect to HTTPS)
+          for SERVICE in vault nomad metrics grafana api app; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L http://${SERVICE}.${DOMAIN}/)
+            echo "  - ${SERVICE}.${DOMAIN}: HTTP $STATUS"
+          done
+      
+      - name: SSL Certificate Check with OpenSSL
+        if: github.event.inputs.action != 'backup'
+        env:
+          DOMAIN: ${{ steps.env.outputs.environment == 'production' && 'cloudya.net' || 'staging.cloudya.net' }}
+        run: |
+          echo "🔐 Testing SSL certificates with OpenSSL..."
+          echo "============================================"
+          
+          FAIL_COUNT=0
+          SUCCESS_COUNT=0
+          
+          # Test each domain
+          for SERVICE in traefik vault nomad metrics grafana api app; do
+            FULL_DOMAIN="${SERVICE}.${DOMAIN}"
+            echo ""
+            echo "Testing: $FULL_DOMAIN"
+            
+            # Test with OpenSSL
+            CERT_INFO=$(echo | timeout 10 openssl s_client -connect "${FULL_DOMAIN}:443" -servername "${FULL_DOMAIN}" 2>/dev/null)
+            
+            if [ $? -eq 0 ]; then
+              # Get issuer
+              ISSUER=$(echo "$CERT_INFO" | openssl x509 -noout -issuer 2>/dev/null)
+              
+              # Check for Let's Encrypt
+              if echo "$ISSUER" | grep -qi "let's encrypt\|ISRG\|R[0-9]"; then
+                echo "  ✅ Let's Encrypt certificate detected"
+                echo "  Issuer: $ISSUER"
+                ((SUCCESS_COUNT++))
+                
+              # Check for default certificate
+              elif echo "$ISSUER" | grep -qi "traefik\|default"; then
+                echo "  ❌ DEFAULT CERTIFICATE DETECTED!"
+                echo "  Issuer: $ISSUER"
+                echo "  ERROR: This domain has a Traefik default certificate"
+                ((FAIL_COUNT++))
+                
+              else
+                echo "  ⚠️ Unknown certificate issuer"
+                echo "  Issuer: $ISSUER"
+              fi
+              
+              # Check expiry
+              EXPIRY=$(echo "$CERT_INFO" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+              echo "  Expires: $EXPIRY"
+              
+              # Test HTTPS status
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://${FULL_DOMAIN}/")
+              echo "  HTTP Status: $STATUS"
+              
+            else
+              echo "  ⚠️ SSL connection failed (certificate may be pending)"
+            fi
+          done
+          
+          echo ""
+          echo "============================================"
+          echo "Summary:"
+          echo "  Success: $SUCCESS_COUNT domains with Let's Encrypt"
+          echo "  Failed: $FAIL_COUNT domains with issues"
+          
+          if [ $FAIL_COUNT -gt 0 ]; then
+            echo ""
+            echo "❌ FAILURE: Found default certificates or SSL issues!"
+            exit 1
+          elif [ $SUCCESS_COUNT -eq 0 ]; then
+            echo ""
+            echo "⚠️ WARNING: No Let's Encrypt certificates detected yet"
+            echo "Certificates may still be generating. Check again in a few minutes."
+          else
+            echo ""
+            echo "✅ SUCCESS: SSL certificates are properly configured!"
+          fi
+          
+          # Give Let's Encrypt time to provision if this is a new install
+          if [[ "${{ github.event.inputs.action }}" == "install" ]]; then
+            echo ""
+            echo "⏳ Waiting for Let's Encrypt certificate provisioning..."
+            sleep 30
+            
+            # Recheck
+            check_ssl "traefik.${DOMAIN}"
+          fi
+      
+      - name: Summary
+        if: success()
+        env:
+          DOMAIN: ${{ steps.env.outputs.environment == 'production' && 'cloudya.net' || 'staging.cloudya.net' }}
+        run: |
+          echo "## 🎉 Traefik Deployment Successful!"
+          echo ""
+          echo "### 📊 Deployment Details"
+          echo "- **Environment:** ${{ steps.env.outputs.environment }}"
+          echo "- **Action:** ${{ github.event.inputs.action || 'install' }}"
+          echo "- **Domain:** ${DOMAIN}"
+          echo ""
+          echo "### 🔗 Access Points"
+          echo "- **Dashboard:** https://traefik.${DOMAIN}"
+          echo "- **Metrics:** http://${{ secrets.SERVER_IP }}:8082/metrics"
+          echo ""
+          echo "### 📝 Next Steps"
+          echo "1. Check dashboard credentials in server: \`/root/traefik-credentials.txt\`"
+          echo "2. Verify SSL certificates are provisioned"
+          echo "3. Test service routing"
+          echo "4. Monitor access logs"

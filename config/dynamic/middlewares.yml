@@ -1,0 +1,145 @@
+# Middleware Definitions
+# Security, authentication, and processing middleware
+
+http:
+  middlewares:
+    # Basic Authentication for admin interfaces
+    auth-basic:
+      basicAuth:
+        users:
+          # admin:password (use htpasswd to generate)
+          # This is a placeholder - will be replaced during deployment
+          - "admin:$2y$10$YourHashedPasswordHere"
+    
+    # Dashboard Authentication
+    auth-dashboard:
+      basicAuth:
+        users:
+          - "admin:$2y$10$YourHashedPasswordHere"
+    
+    # Security Headers
+    security-headers:
+      headers:
+        frameDeny: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+        forceSTSHeader: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customFrameOptionsValue: "SAMEORIGIN"
+        contentSecurityPolicy: "default-src 'self'"
+        referrerPolicy: "strict-origin-when-cross-origin"
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow,nosnippet,noarchive,noimageindex"
+          Server: ""  # Remove server header
+    
+    # Security Headers for WebSocket
+    security-headers-websocket:
+      headers:
+        frameDeny: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+        forceSTSHeader: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customResponseHeaders:
+          X-Robots-Tag: "noindex,nofollow"
+    
+    # CORS for API
+    cors:
+      headers:
+        accessControlAllowMethods:
+          - GET
+          - OPTIONS
+          - PUT
+          - POST
+          - DELETE
+          - PATCH
+        accessControlAllowHeaders:
+          - "*"
+        accessControlAllowOriginList:
+          - "https://cloudya.net"
+          - "https://app.cloudya.net"
+          - "https://staging.cloudya.net"
+          - "https://app-staging.cloudya.net"
+          - "http://localhost:3000"
+          - "http://localhost:3001"
+        accessControlMaxAge: 86400
+        addVaryHeader: true
+        accessControlAllowCredentials: true
+    
+    # Rate Limiting for general use
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 200
+        period: 1m
+        sourceCriterion:
+          ipStrategy:
+            depth: 1
+    
+    # Rate Limiting for API (higher limits)
+    rate-limit-api:
+      rateLimit:
+        average: 1000
+        burst: 2000
+        period: 1m
+        sourceCriterion:
+          ipStrategy:
+            depth: 1
+    
+    # Compression
+    compression:
+      compress:
+        excludedContentTypes:
+          - text/event-stream
+    
+    # Redirect www to non-www
+    redirect-www:
+      redirectRegex:
+        regex: "^https://www\\.(.*)"
+        replacement: "https://${1}"
+        permanent: true
+    
+    # IP Whitelist (optional, disabled by default)
+    ip-whitelist:
+      ipWhiteList:
+        sourceRange:
+          - "127.0.0.1/32"
+          - "10.0.0.0/8"
+          - "172.16.0.0/12"
+          - "192.168.0.0/16"
+    
+    # Retry on backend failure
+    retry:
+      retry:
+        attempts: 3
+        initialInterval: 100ms
+        multiplier: 2
+        maxInterval: 1s
+    
+    # Circuit Breaker
+    circuit-breaker:
+      circuitBreaker:
+        expression: "ResponseCodeRatio(500, 600, 0, 600) > 0.5"
+        checkPeriod: 10s
+        fallbackDuration: 10s
+        recoveryDuration: 10s
+    
+    # Request ID
+    request-id:
+      plugin:
+        requestId:
+          headerName: "X-Request-ID"
+          
+    # Remove sensitive headers
+    strip-headers:
+      headers:
+        customRequestHeaders:
+          Authorization: ""
+          Cookie: ""
+          X-Api-Key: ""
+        customResponseHeaders:
+          Set-Cookie: ""
