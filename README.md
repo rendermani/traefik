@@ -207,4 +207,4 @@ journalctl -u traefik -f
 - Keep dashboard authentication strong
 - Regularly update Traefik version
 - Monitor SSL certificate expiry
-- Review access logs regularly
+- Review access logs regularly# Trigger deploy
