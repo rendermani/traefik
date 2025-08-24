@@ -65,12 +65,38 @@ jobs:
           echo "🚀 Deploying Traefik via Nomad API (no SSH)"
           
           # Install nomad CLI to convert HCL to JSON
+          echo "Installing Nomad CLI..."
           curl -sL https://releases.hashicorp.com/nomad/1.7.2/nomad_1.7.2_linux_amd64.zip -o nomad.zip
           unzip -q nomad.zip
           chmod +x nomad
           
+          # Debug: Check if files exist
+          echo "Current directory contents:"
+          ls -la
+          
+          # Check if traefik.nomad exists
+          if [ ! -f "traefik.nomad" ]; then
+            echo "❌ traefik.nomad file not found!"
+            exit 1
+          fi
+          
           # Convert HCL to JSON
-          ./nomad job run -output traefik.nomad > traefik.json
+          echo "Converting HCL to JSON..."
+          ./nomad job run -output traefik.nomad > traefik.json || {
+            echo "❌ Failed to convert HCL to JSON"
+            echo "Nomad error output:"
+            ./nomad job run -output traefik.nomad
+            exit 1
+          }
+          
+          # Check JSON was created
+          if [ ! -f "traefik.json" ] || [ ! -s "traefik.json" ]; then
+            echo "❌ traefik.json was not created or is empty"
+            exit 1
+          fi
+          
+          echo "JSON file created successfully"
+          echo "JSON file size: $(wc -c < traefik.json) bytes"
           
           # Submit job via Nomad API
           echo "Submitting job to Nomad..."
@@ -82,13 +108,18 @@ jobs:
             -w "\n%{http_code}" -s)
           
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          
+          echo "HTTP Response Code: $HTTP_CODE"
           
           if [ "$HTTP_CODE" = "200" ]; then
             echo "✅ Job submitted successfully via API"
-            EVAL_ID=$(echo "$RESPONSE" | head -n-1 | jq -r .EvalID)
+            EVAL_ID=$(echo "$BODY" | jq -r .EvalID)
             echo "Evaluation ID: $EVAL_ID"
           else
             echo "❌ Failed to submit job. HTTP Code: $HTTP_CODE"
+            echo "Response body:"
+            echo "$BODY"
             exit 1
           fi
       
